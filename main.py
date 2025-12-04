@@ -26,15 +26,16 @@ PHP_ENDPOINT = "https://bitrix.emet.in.ua/get_chat_id.php"
 CONFIG_FILE = "config.json"
 
 SHEET_NAME = "BitrixChat"
-WORKSHEET_DATA = "Auto_Monitoring"   # Лист для нових діалогів
-WORKSHEET_CONFIG = "System_Config"   # Лист з датою (комірка B1)
+WORKSHEET_DATA = "Auto_Monitoring"   # Лист для діалогів
+WORKSHEET_CONFIG = "System_Config"   # Лист з датою
 
 AI_MODEL = "gpt-4o"
+MIN_MESSAGES_COUNT = 2  # <--- ИСПРАВЛЕНО: Минимальное кол-во сообщений
 
 # 1. МЕНЕДЖЕРИ
 MANAGER_NAMES = ["Яна Наконечна", "Софія Кривенко", "Влада Шарай", "Анастасия Другтейн"]
 
-# 2. B2B СЛОВНИКИ (Безпечні)
+# 2. B2B СЛОВНИКИ
 B2B_KEYWORDS = [
     # Навчання
     "розклад семінарів", "расписание семинаров", 
@@ -61,6 +62,7 @@ B2B_KEYWORDS = [
     "блогер", "blogger", "бартер", "barter", "рекламна інтеграція"
 ]
 
+
 B2B_NAMES = ["dr", "dr.", "лікар", "врач", "косметолог", "dermatolog", "cosmetolog", "clinic", "клініка", "клиника", "md", "estet"]
 REFERRAL_KEYWORDS = ["порадьте косметолога", "посоветуйте", "де зробити", "контакти лікаря", "записатись на процедуру", "уколоть"]
 CLOSE_WORDS = ["ттн", "накладна", "номер накладної", "дякуємо за замовлення", "оформлено", "реквізити", "оплату отримали"]
@@ -74,7 +76,6 @@ def load_config():
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f: return json.load(f)
     except:
-        # Дефолтні, якщо файл не прочитався
         return {
             "SUPPLEMENTS": {"no_discount": 10, "no_description": 10},
             "COSMETICS": {"no_emoji": 10, "no_cross_sell": 10},
@@ -113,7 +114,6 @@ def check_emojis_presence(text):
 
 def check_question_presence(text):
     tail = text[-200:].strip()
-    tail_clean = re.sub(r'[^\w\s\?\.!]', '', tail) 
     if "?" in tail or "?" in text[-50:]: return True
     return False
 
@@ -146,7 +146,7 @@ def get_chat_id_via_php(session_id):
     return None
 
 def find_chat_id_ultimate(lead_id):
-    # 1. API
+    # 1. API Direct
     try:
         res = requests.post(f"{BITRIX_WEBHOOK}imopenlines.crm.chat.get", json={"CRM_ENTITY_TYPE": "LEAD", "CRM_ENTITY": lead_id}).json()
         if res.get('result'): return f"chat{res['result'][0]['CHAT_ID']}"
@@ -185,6 +185,8 @@ def get_chat_text(lead_id):
     try:
         res_msg = requests.post(f"{BITRIX_WEBHOOK}im.dialog.messages.get", json={"DIALOG_ID": dialog_id, "LIMIT": 100}).json()
         messages = res_msg.get('result', {}).get('messages', [])
+        
+        # Исправленная проверка
         if len(messages) < MIN_MESSAGES_COUNT: return None
         
         users_dict = res_msg.get('result', {}).get('users', [])
@@ -220,7 +222,6 @@ JSON: {"product_type": "B2B", "score": 0, "summary": "...", "good_points": "..."
     type_instr = "СИСТЕМА: Це БАДи. Оцінюй як SUPPLEMENTS." if is_suppl else "Визнач категорію (COSMETICS або SUPPLEMENTS)."
     emoji_instr = "СИСТЕМА: Емодзі є." if has_emojis else "СИСТЕМА: Емодзі немає."
     discount_instr = "СИСТЕМА: Знижку знайдено в тексті. Штрафувати заборонено." if has_discount else "СИСТЕМА: Згадок про знижку не знайдено."
-    
     sales_status = "СИСТЕМА: Угода закрита (ТТН). Успіх." if is_closed_text else "СИСТЕМА: Угода НЕ закрита."
     
     question_instr = "СИСТЕМА: Питання немає."
@@ -246,30 +247,17 @@ JSON: {"product_type": "B2B", "score": 0, "summary": "...", "good_points": "..."
 5. {discount_instr}
 
 АЛГОРИТМ ОЦІНКИ B2C (100 балів):
-
-1. ВИЗНАЧ СЦЕНАРІЙ ДІАЛОГУ:
-   - Сценарій А (Інтерес).
-   - Сценарій Б (Заперечення: "Дорого", "Ні").
-
+1. ВИЗНАЧ СЦЕНАРІЙ: Інтерес (А) або Заперечення (Б).
 2. РОЗРАХУНОК ШТРАФІВ:
-   🔴 БАДи (SUPPLEMENTS): 
-     - ЗНИЖКА: Дивись ФАКТ №5. Якщо немає -> Мінус {pen_s_disc}.
-     - ОПИС: Немає -> -{pen_s_desc}. 
-     - ЕМОДЗІ: ІГНОРУЙ.
-   🟢 КОСМЕТИКА (COSMETICS):
-     - ЕМОДЗІ: Дивись ФАКТ №3. Немає -> Мінус {pen_c_emoji}.
-     - CROSS-SELL: Якщо Сценарій А і немає -> Мінус {pen_c_cross}.
-   ⚫ ЗАГАЛЬНІ:
-     - ЗАПЕРЕЧЕННЯ (Сцен. Б): Здався? -> Мінус {pen_g_giveup}.
-     - ЗАПИТАННЯ: Дивись ФАКТ №4. Немає -> Мінус {pen_g_quest}.
-     - СТОП-СЛОВА: "На жаль"? ТАК -> Мінус {pen_g_stop}.
+   🔴 БАДи: Немає знижки -> -{pen_s_disc}. Немає опису -> -{pen_s_desc}.
+   🟢 КОСМЕТИКА: Немає емодзі -> -{pen_c_emoji}. Немає cross-sell -> -{pen_c_cross}.
+   ⚫ ЗАГАЛЬНІ: Здався на запереченні -> -{pen_g_giveup}. Немає питання в кінці -> -{pen_g_quest}. "На жаль" -> -{pen_g_stop}.
 
 3. ЕКСПЕРТНИЙ ВИСНОВОК РОПа (Sales Feedback):
    - Напиши розгорнутий, живий відгук про якість роботи менеджера.
    - Оціни: Ініціативу, Експертність, Емпатію.
    - Як відпрацьовано заперечення (якщо були)?
    - Чи був персональний підхід?
-
 
 ФОРМАТ JSON:
 {{
@@ -334,13 +322,18 @@ def analyze_row(dialog_text, client_name):
 
 # === MAIN RUNNER (AUTO-UPDATE) ===
 def main():
-    print(f"--- GITHUB AUTO-MONITORING (v40) ---")
+    print(f"--- GITHUB AUTO-MONITORING (v41) ---")
     
     try:
         gc = gspread.service_account_from_dict(creds_dict)
         sh = gc.open(SHEET_NAME)
         ws_data = sh.worksheet(WORKSHEET_DATA)
         ws_conf = sh.worksheet(WORKSHEET_CONFIG)
+        
+        # Загружаем существующие ID чтобы избежать дублей
+        existing_ids = ws_data.col_values(1) # Колонка A
+        print(f"📊 В базі вже є {len(existing_ids)} записів.")
+        
     except Exception as e:
         print(f"🔴 Critical Error Google: {e}")
         return
@@ -348,13 +341,11 @@ def main():
     # 1. Читаємо дату останнього запуску
     last_run_date = ws_conf.acell('B1').value
     if not last_run_date:
-        # Якщо вперше - беремо за вчора
         last_run_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     
     print(f"📅 Шукаємо ліди новіші за: {last_run_date}")
 
-    total_added = 0
-    # Перебираємо всіх менеджерів
+    total_processed = 0
     manager_ids_int = [1519, 2077, 6894, 13408]
     
     for mgr_id in manager_ids_int:
@@ -365,14 +356,13 @@ def main():
                 "filter": {"ASSIGNED_BY_ID": mgr_id, ">DATE_CREATE": f"{last_run_date}T00:00:00"},
                 "select": ["ID", "TITLE", "STATUS_ID", "DATE_CREATE", "HAS_DEAL", "NAME", "LAST_NAME", "SOURCE_ID"]
             }
-            # Читаємо першу сторінку (50 штук). 
             leads = requests.post(f"{BITRIX_WEBHOOK}crm.lead.list", json=payload).json().get('result', [])
             
             if not leads:
                 print("Немає нових.")
                 continue
 
-            print(f"Знайдено {len(leads)} нових лідів.")
+            print(f"Знайдено {len(leads)} лідів.")
 
             for lead in leads:
                 source_id = str(lead.get('SOURCE_ID', ''))
@@ -393,25 +383,39 @@ def main():
                     link = f"https://bitrix.emet.in.ua/crm/lead/details/{lead['ID']}/"
 
                     row_data = [
-                        lead['ID'], lead['DATE_CREATE'][:10], mgr_id, client_name,
+                        str(lead['ID']), lead['DATE_CREATE'][:10], mgr_id, client_name,
                         readable_source, readable_status, has_deal, link, chat_text[:45000],
                         result.get('product_type'), result.get('score'), result.get('summary'),
                         str(result.get('good_points')), str(result.get('bad_points')),
                         result.get('recommendation'), result.get('sales_feedback')
                     ]
                     
-                    ws_data.append_row(row_data)
-                    total_added += 1
-                    print(f"   [+] Лід {lead['ID']} додано.")
+                    # --- ЛОГИКА ОБНОВЛЕНИЯ (v41) ---
+                    lead_id_str = str(lead['ID'])
+                    if lead_id_str in existing_ids:
+                        # Обновляем существующую
+                        row_index = existing_ids.index(lead_id_str) + 1
+                        # Обновляем диапазон (кроме ID и даты, обновляем статус, сделку и AI данные)
+                        # A=1, B=2, C=3... I=9 (Chat), J=10 (Type), K=11 (Score)...
+                        # Обновляем все поля строки
+                        ws_data.update(f"A{row_index}:P{row_index}", [row_data])
+                        print(f"   [♻️ UPD] Лід {lead['ID']} оновлено.")
+                    else:
+                        # Добавляем новую
+                        ws_data.append_row(row_data)
+                        existing_ids.append(lead_id_str) # Добавляем в локальный список
+                        print(f"   [🆕 NEW] Лід {lead['ID']} додано.")
+                    
+                    total_processed += 1
                     time.sleep(1.5)
                     
         except Exception as e:
             print(f"Err: {e}")
 
-    # 2. Оновлюємо дату в конфізі
+    # 2. Оновлюємо дату
     today = datetime.now().strftime("%Y-%m-%d")
     ws_conf.update_acell('B1', today)
-    print(f"\n✅ [DONE] Додано {total_added} рядків. Дата оновлена на {today}.")
+    print(f"\n✅ [DONE] Оброблено {total_processed} лідів. Дата оновлена на {today}.")
 
 if __name__ == "__main__":
     main()
