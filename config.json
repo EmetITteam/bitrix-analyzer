@@ -1,0 +1,15 @@
+{
+  "SUPPLEMENTS": {
+    "no_discount": 10,
+    "no_description": 10
+  },
+  "COSMETICS": {
+    "no_emoji": 10,
+    "no_cross_sell": 10
+  },
+  "GENERAL": {
+    "no_question": 5,
+    "stop_word_na_zhal": 15,
+    "gave_up_on_objection": 10
+  }
+}
