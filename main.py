@@ -446,17 +446,35 @@ def main():
     for mgr_id in MANAGER_IDS_INT:
         print(f"\n👤 Менеджер {mgr_id}...", end=" ")
         try:
-            # Запрос лидов по дате
-            payload = {
-                "order": {"DATE_CREATE": "ASC"},
-                "filter": {"ASSIGNED_BY_ID": mgr_id, ">DATE_CREATE": f"{start_date_val}T00:00:00"},
-                "select": ["ID", "TITLE", "STATUS_ID", "DATE_CREATE", "NAME", "LAST_NAME", "SOURCE_ID"]
-            }
-            leads = requests.post(f"{BITRIX_WEBHOOK}crm.lead.list", json=payload).json().get('result', [])
-            
+            # --- НАЧАЛО ЗАМЕНЫ: ПАГИНАЦИЯ ---
+            leads = []
+            start_batch = 0
+            while True:
+                payload = {
+                    "order": {"DATE_CREATE": "ASC"},
+                    "filter": {"ASSIGNED_BY_ID": mgr_id, ">DATE_CREATE": f"{start_date_val}T00:00:00"},
+                    "select": ["ID", "TITLE", "STATUS_ID", "DATE_CREATE", "NAME", "LAST_NAME", "SOURCE_ID"],
+                    "start": start_batch
+                }
+                
+                resp = requests.post(f"{BITRIX_WEBHOOK}crm.lead.list", json=payload).json()
+                batch = resp.get('result', [])
+                
+                if not batch:
+                    break
+                    
+                leads.extend(batch)
+                
+                if 'next' in resp:
+                    start_batch = resp['next']
+                    time.sleep(0.2) # Небольшая пауза для стабильности
+                else:
+                    break
+
             if not leads:
                 print("Пусто.")
                 continue
+            # --- КОНЕЦ ЗАМЕНЫ ---
 
             print(f"Найдено {len(leads)} лидов за период.")
 
