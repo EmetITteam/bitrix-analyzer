@@ -265,7 +265,7 @@ def main():
     print(f"--- ЗАПУСК АНАЛІЗАТОРА V38 (STABLE) ---")
     
     try:
-        gc = gspread.service_account(filename=CREDENTIALS_FILE)
+        gc = gspread.service_account_from_dict(creds_dict)
         sh = gc.open(SHEET_NAME)
         ws = sh.worksheet(WORKSHEET_NAME)
     except Exception as e:
