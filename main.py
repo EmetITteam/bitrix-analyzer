@@ -5,9 +5,16 @@ import re
 import os
 from openai import OpenAI
 
-# --- НАЛАШТУВАННЯ ---
-OPENAI_API_KEY = "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" 
-CREDENTIALS_FILE = "creds.json"
+# --- НАЛАШТУВАННЯ (GITHUB ACTIONS) ---
+# 1. Отримуємо ключі з секретів GitHub
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+SECRET_KEY = os.environ["PHP_SECRET_KEY"]
+
+# 2. Отримуємо JSON-ключ Google з секрету і перетворюємо його на словник
+creds_json = os.environ["GSPREAD_CREDS"]
+creds_dict = json.loads(creds_json)
+
+# 3. Інші налаштування
 CONFIG_FILE = "config.json"
 SHEET_NAME = "BitrixChat"
 WORKSHEET_NAME = "Final_V21_27_1006" 
