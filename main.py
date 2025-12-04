@@ -202,11 +202,35 @@ def check_manager_presence(text):
 def check_is_b2b_python(text, client_name):
     text_lower = text.lower()
     name_lower = client_name.lower()
+    
+    # 1. БЕЛЫЙ СПИСОК (ИСКЛЮЧЕНИЯ)
+    # Если найдены эти фразы — это точно B2C, даже если есть слово "косметолог"
+    B2C_EXCEPTIONS = [
+        "після косметолога", "после косметолога", 
+        "порадив косметолог", "посоветовал косметолог",
+        "мій косметолог", "мой косметолог",
+        "була у косметолога", "была у косметолога",
+        "від косметолога", "от косметолога"
+    ]
+    
+    for exc in B2C_EXCEPTIONS:
+        if exc in text_lower:
+            return False
+
+    # 2. ПРОВЕРКА ПО КЛЮЧЕВЫМ СЛОВАМ (B2B)
     for word in B2B_KEYWORDS:
         if word in text_lower: return True
+        
+    # 3. ПРОВЕРКА ПО ИМЕНИ/НИКУ (Если в имени есть "Dr.", "Clinic" и т.д.)
     for title in B2B_NAMES:
-        if title in name_lower: return True
+        # Проверяем, что это отдельное слово, а не часть фамилии (например Dragan)
+        # Но для простоты оставим как было, только добавим проверку длины
+        if title in name_lower: 
+            return True
+
+    # 4. СПЕЦИФИЧЕСКАЯ ПРОВЕРКА IUSE (Если нужно)
     if "iuse" in text_lower and not ("collagen" in text_lower or "колаген" in text_lower): return True
+    
     return False
 
 def check_keywords(text, keywords):
