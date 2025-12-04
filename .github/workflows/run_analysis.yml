@@ -2,7 +2,7 @@ name: Run AI Analyzer
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Запуск кожні 6 годин (можна змінити)
+    - cron: '0 2 * * *'  # запускать каждый день в 2:00 ночи по UTC
   workflow_dispatch:       # Дозволяє запускати кнопку вручну
 
 jobs:
