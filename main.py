@@ -3,58 +3,78 @@ import json
 import time
 import re
 import os
+import requests
+from datetime import datetime, timedelta
 from openai import OpenAI
 
-# --- НАЛАШТУВАННЯ (GITHUB ACTIONS) ---
-# 1. Отримуємо ключі з секретів GitHub
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-SECRET_KEY = os.environ["PHP_SECRET_KEY"]
+# ============================================
+# НАЛАШТУВАННЯ (GITHUB SECRETS)
+# ============================================
+try:
+    OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+    PHP_SECRET_KEY = os.environ["PHP_SECRET_KEY"]
+    
+    creds_json = os.environ["GSPREAD_CREDS"]
+    creds_dict = json.loads(creds_json)
+except KeyError as e:
+    print(f"🔴 CRITICAL: Не знайдено секрет {e}!")
+    exit(1)
 
-# 2. Отримуємо JSON-ключ Google з секрету і перетворюємо його на словник
-creds_json = os.environ["GSPREAD_CREDS"]
-creds_dict = json.loads(creds_json)
-
-# 3. Інші налаштування
+# --- КОНФІГУРАЦІЯ ---
+BITRIX_WEBHOOK = "https://bitrix.emet.in.ua/rest/2049/hx8tyfl6nkj5kluk/"
+PHP_ENDPOINT = "https://bitrix.emet.in.ua/get_chat_id.php"
 CONFIG_FILE = "config.json"
+
 SHEET_NAME = "BitrixChat"
-WORKSHEET_NAME = "Final_V21_27_1006" 
-AI_MODEL = "gpt-4o" 
-# --------------------
+WORKSHEET_DATA = "Auto_Monitoring"   # Лист для нових діалогів
+WORKSHEET_CONFIG = "System_Config"   # Лист з датою (комірка B1)
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+AI_MODEL = "gpt-4o"
 
-# 1. ЖОРСТКИЙ СПИСОК МЕНЕДЖЕРІВ
-MANAGER_NAMES = [
-    "Яна Наконечна", "Софія Кривенко", "Влада Шарай", "Анастасия Другтейн"
-]
+# 1. МЕНЕДЖЕРИ
+MANAGER_NAMES = ["Яна Наконечна", "Софія Кривенко", "Влада Шарай", "Анастасия Другтейн"]
 
-# 2. B2B СЛОВНИКИ (Safe Mode)
-# Видалено "кабінет", "реєстрація" щоб не плутати з сайтом.
+# 2. B2B СЛОВНИКИ (Безпечні)
 B2B_KEYWORDS = [
-    "розклад", "расписание", "семінар", "семинар", "навчання", "обучение",
-    "прайс косметолога", "прайс для косметологов", "я косметолог", "я врач", "я лікар",
-    "диплом", "сертифікат", "сертификат", 
-    "співпрац", "сотруднич", "опт", "гурт",
-    "протокол", "protocol", "анкета", # Протоколи залишаємо, це зазвичай лікарі
+    # Навчання
+    "розклад семінарів", "расписание семинаров", 
+    "запис на семінар", "запись на семинар",
+    "навчання косметологів", "обучение косметологов",
+    
+    # Прайси/Умови
+    "прайс косметолога", "прайс для косметологов", "прайс для косметологів",
+    "умови співпраці", "условия сотрудничества",
+    "оптовий", "оптовый", "гуртовий", # Замість просто "опт"
+    
+    # Ідентифікація
+    "я косметолог", "я лікар", "я врач", "ми клініка", "мы клиника", "ми салон",
+    "кабінет косметолога", "кабинет косметолога",
+    
+    # Документи (лише конкретні фрази)
+    "надіслати диплом", "отправить диплом", "фото диплома", 
+    
+    
+    # Проф. бренди (Тут безпечно)
     "neuramis", "нейраміс", "medytox", "медитокс", "neuronox", "нейронокс",
-    "блогер", "blogger", "бартер", "barter", "реклам"
+    
+    # Інфлюенс
+    "блогер", "blogger", "бартер", "barter", "рекламна інтеграція"
 ]
 
 B2B_NAMES = ["dr", "dr.", "лікар", "врач", "косметолог", "dermatolog", "cosmetolog", "clinic", "клініка", "клиника", "md", "estet"]
-
-# 3. REFERRAL
 REFERRAL_KEYWORDS = ["порадьте косметолога", "посоветуйте", "де зробити", "контакти лікаря", "записатись на процедуру", "уколоть"]
-
-# 4. ФАКТИ
 CLOSE_WORDS = ["ттн", "накладна", "номер накладної", "дякуємо за замовлення", "оформлено", "реквізити", "оплату отримали"]
 BRAND_EMOJIS = ["🌿", "🍃", "☘️", "🌱", "🍀", "💰", "✨", "💫", "🛒", "🛍", "💚", "🤍", "💧", "☺️", "🙌🏻", "🥰", "💌"]
 DISCOUNT_WORDS = ["знижка", "скидка", "парна", "парная", "від 2", "от 2", "набір", "набор", "курс", "15%", "-%"]
+
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # === ЗАВАНТАЖЕННЯ КОНФІГУ ===
 def load_config():
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f: return json.load(f)
     except:
+        # Дефолтні, якщо файл не прочитався
         return {
             "SUPPLEMENTS": {"no_discount": 10, "no_description": 10},
             "COSMETICS": {"no_emoji": 10, "no_cross_sell": 10},
@@ -63,7 +83,6 @@ def load_config():
 CONFIG = load_config()
 
 # === PYTHON DETECTORS ===
-
 def check_manager_presence(text):
     for name in MANAGER_NAMES:
         if name in text: return True
@@ -116,18 +135,88 @@ def check_discount_presence(text):
         if w in text_lower: return True
     return False
 
-# === ГЕНЕРАТОР ПРОМПТУ ===
-def generate_prompt(has_emojis, has_question, is_closed_text, is_suppl, has_discount, mode):
+# === BITRIX API HELPERS ===
+def get_chat_id_via_php(session_id):
+    try:
+        res = requests.get(PHP_ENDPOINT, params={"session_id": session_id, "key": PHP_SECRET_KEY}, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if 'chat_id' in data: return data['chat_id']
+    except: pass
+    return None
+
+def find_chat_id_ultimate(lead_id):
+    # 1. API
+    try:
+        res = requests.post(f"{BITRIX_WEBHOOK}imopenlines.crm.chat.get", json={"CRM_ENTITY_TYPE": "LEAD", "CRM_ENTITY": lead_id}).json()
+        if res.get('result'): return f"chat{res['result'][0]['CHAT_ID']}"
+    except: pass
     
-    # B2B
+    # 2. Activity + PHP
+    try:
+        payload = {
+            "filter": {"OWNER_ID": lead_id, "OWNER_TYPE_ID": 1, "PROVIDER_ID": "IMOPENLINES_SESSION"},
+            "select": ["ID", "PROVIDER_PARAMS", "ASSOCIATED_ENTITY_ID"],
+            "order": {"ID": "DESC"}
+        }
+        res = requests.post(f"{BITRIX_WEBHOOK}crm.activity.list", json=payload).json()
+        activities = res.get('result', [])
+        
+        for act in activities:
+            params = act.get('PROVIDER_PARAMS', {})
+            if isinstance(params, str) and params:
+                try: params = json.loads(params)
+                except: pass
+            
+            if isinstance(params, dict):
+                if 'chatId' in params: return f"chat{params['chatId']}"
+                if 'CHAT_ID' in params: return f"chat{params['CHAT_ID']}"
+            
+            session_id = act.get('ASSOCIATED_ENTITY_ID')
+            if session_id:
+                recovered_id = get_chat_id_via_php(session_id)
+                if recovered_id: return f"chat{recovered_id}"
+    except: pass
+    return None
+
+def get_chat_text(lead_id):
+    dialog_id = find_chat_id_ultimate(lead_id)
+    if not dialog_id: return None
+    try:
+        res_msg = requests.post(f"{BITRIX_WEBHOOK}im.dialog.messages.get", json={"DIALOG_ID": dialog_id, "LIMIT": 100}).json()
+        messages = res_msg.get('result', {}).get('messages', [])
+        if len(messages) < MIN_MESSAGES_COUNT: return None
+        
+        users_dict = res_msg.get('result', {}).get('users', [])
+        user_names = {}
+        for u in users_dict:
+            name = u.get('name', '').strip()
+            last = u.get('last_name', '').strip()
+            user_names[u['id']] = name if last in name else f"{name} {last}".strip()
+
+        clean_dialog = []
+        messages.sort(key=lambda x: x['id'])
+        
+        has_text = False
+        for msg in messages:
+            if msg['author_id'] == 0 or not msg.get('text'): continue
+            author_name = user_names.get(msg['author_id'], "Клиент")
+            clean_t = re.sub(r'\[.*?\]', '', msg['text']).replace('&quot;', '"').strip()
+            clean_dialog.append(f"{author_name}: {clean_t}")
+            has_text = True
+        
+        if not has_text: return None
+        return "\n".join(clean_dialog)
+    except: return None
+
+# === AI LOGIC ===
+def generate_prompt(has_emojis, has_question, is_closed_text, is_suppl, has_discount, mode):
     if mode == "B2B":
         return """
-Ти — Експерт з комунікацій. Це діалог B2B (лікар/партнер).
+Ти — Експерт з комунікацій (РОП). Це діалог B2B (лікар/партнер).
 Твоє завдання: Оцінити тон і ввічливість. Оцінку продажів (Score) ставити 0.
 JSON: {"product_type": "B2B", "score": 0, "summary": "...", "good_points": "...", "bad_points": "-", "recommendation": "-", "sales_feedback": "..."}
 """
-
-    # B2C
     type_instr = "СИСТЕМА: Це БАДи. Оцінюй як SUPPLEMENTS." if is_suppl else "Визнач категорію (COSMETICS або SUPPLEMENTS)."
     emoji_instr = "СИСТЕМА: Емодзі є." if has_emojis else "СИСТЕМА: Емодзі немає."
     discount_instr = "СИСТЕМА: Знижку знайдено в тексті. Штрафувати заборонено." if has_discount else "СИСТЕМА: Згадок про знижку не знайдено."
@@ -156,39 +245,31 @@ JSON: {"product_type": "B2B", "score": 0, "summary": "...", "good_points": "..."
 4. {question_instr}
 5. {discount_instr}
 
-АЛГОРИТМ ОЦІНКИ B2C (Початково 100 балів):
+АЛГОРИТМ ОЦІНКИ B2C (100 балів):
 
 1. ВИЗНАЧ СЦЕНАРІЙ ДІАЛОГУ:
-   - Сценарій А (Інтерес): Клієнт запитує ціну, погоджується або мовчить.
-   - Сценарій Б (Заперечення): Клієнт пише "Ні", "Дорого", "Подумаю".
+   - Сценарій А (Інтерес).
+   - Сценарій Б (Заперечення: "Дорого", "Ні").
 
 2. РОЗРАХУНОК ШТРАФІВ:
-
-   🔴 БАДи (SUPPLEMENTS):
-   - ЗНИЖКА: Дивись ФАКТ №5. 
-     - Якщо система каже, що знижка є -> ОК.
-     - Якщо немає -> Мінус {pen_s_disc}. (Bad: "Не запропоновано вигоду від кількості").
-   - ОПИС: Є опис користі ПЕРЕД ціною? НІ -> Мінус {pen_s_desc}.
-   - ЕМОДЗІ: ІГНОРУЙ ПОВНІСТЮ.
-
+   🔴 БАДи (SUPPLEMENTS): 
+     - ЗНИЖКА: Дивись ФАКТ №5. Якщо немає -> Мінус {pen_s_disc}.
+     - ОПИС: Немає -> -{pen_s_desc}. 
+     - ЕМОДЗІ: ІГНОРУЙ.
    🟢 КОСМЕТИКА (COSMETICS):
-   - ЕМОДЗІ: Дивись ФАКТ №3. Немає -> Мінус {pen_c_emoji}. (Bad: "Відсутні фірмові емодзі").
-   - CROSS-SELL: 
-     - Якщо Сценарій А (Інтерес) -> Немає? Мінус {pen_c_cross}.
-     - Якщо Сценарій Б (Заперечення) -> Cross-sell НЕ вимагається.
-
+     - ЕМОДЗІ: Дивись ФАКТ №3. Немає -> Мінус {pen_c_emoji}.
+     - CROSS-SELL: Якщо Сценарій А і немає -> Мінус {pen_c_cross}.
    ⚫ ЗАГАЛЬНІ:
-   - РОБОТА З ЗАПЕРЕЧЕННЯМ (Тільки Сценарій Б):
-     - Здався ("Ок")? -> Мінус {pen_g_giveup}.
-     - Спробував відпрацювати або Soft Exit? -> ОК (0 штрафу).
-   - ЗАПИТАННЯ: Дивись ФАКТ №4. (Немає і не закрито -> Мінус {pen_g_quest}).
-   - СТОП-СЛОВА: "На жаль"? ТАК -> Мінус {pen_g_stop}.
+     - ЗАПЕРЕЧЕННЯ (Сцен. Б): Здався? -> Мінус {pen_g_giveup}.
+     - ЗАПИТАННЯ: Дивись ФАКТ №4. Немає -> Мінус {pen_g_quest}.
+     - СТОП-СЛОВА: "На жаль"? ТАК -> Мінус {pen_g_stop}.
 
 3. ЕКСПЕРТНИЙ ВИСНОВОК РОПа (Sales Feedback):
    - Напиши розгорнутий, живий відгук про якість роботи менеджера.
    - Оціни: Ініціативу, Експертність, Емпатію.
    - Як відпрацьовано заперечення (якщо були)?
    - Чи був персональний підхід?
+
 
 ФОРМАТ JSON:
 {{
@@ -198,33 +279,24 @@ JSON: {"product_type": "B2B", "score": 0, "summary": "...", "good_points": "..."
   "good_points": "Текст",
   "bad_points": "Текст",
   "recommendation": "Текст",
-  "sales_feedback": "Твій експертний коментар"
+  "sales_feedback": "Текст"
 }}
 """
 
 def analyze_row(dialog_text, client_name):
     if not dialog_text or len(dialog_text) < 5: return None
     
-    # 1. B2B ФІЛЬТР
     is_b2b_python = check_is_b2b_python(dialog_text, client_name)
-    if is_b2b_python:
-        mode = "B2B"
+    if is_b2b_python: mode = "B2B"
     else:
         if check_keywords(dialog_text, REFERRAL_KEYWORDS):
-            return {
-                "product_type": "B2C_REFERRAL", "score": 0, "summary": "Пошук косметолога.",
-                "good_points": "-", "bad_points": "-", "recommendation": "-", "sales_feedback": "Технічний запит"
-            }
+            return {"product_type": "B2C_REFERRAL", "score": 0, "summary": "Пошук лікаря", "good_points": "-", "bad_points": "-", "recommendation": "-", "sales_feedback": "Технічний запит"}
         
         has_manager = check_manager_presence(dialog_text)
         if not has_manager:
-            return {
-                "product_type": "NO_REPLY", "score": 0, "summary": "Без відповіді",
-                "good_points": "-", "bad_points": "Ігнорування", "recommendation": "Відповісти", "sales_feedback": "Втрачений лід"
-            }
+            return {"product_type": "NO_REPLY", "score": 0, "summary": "Без відповіді", "good_points": "-", "bad_points": "Ігнорування", "recommendation": "Відповісти", "sales_feedback": "Втрачений лід"}
         mode = "B2C"
 
-    # 2. АНАЛІЗ
     has_emojis = check_emojis_presence(dialog_text)
     has_question = check_question_presence(dialog_text) 
     is_closed = check_deal_closed_text(dialog_text)
@@ -256,71 +328,90 @@ def analyze_row(dialog_text, client_name):
             if data['score'] == 0: data['score'] = 40
 
         return data
-
     except Exception as e:
         print(f"Error AI: {e}")
         return None
 
+# === MAIN RUNNER (AUTO-UPDATE) ===
 def main():
-    print(f"--- ЗАПУСК АНАЛІЗАТОРА V38 (STABLE) ---")
+    print(f"--- GITHUB AUTO-MONITORING (v40) ---")
     
     try:
         gc = gspread.service_account_from_dict(creds_dict)
         sh = gc.open(SHEET_NAME)
-        ws = sh.worksheet(WORKSHEET_NAME)
+        ws_data = sh.worksheet(WORKSHEET_DATA)
+        ws_conf = sh.worksheet(WORKSHEET_CONFIG)
     except Exception as e:
-        print(f"Critical Error: {e}")
+        print(f"🔴 Critical Error Google: {e}")
         return
 
-    headers = ["Тип (AI)", "Оцінка", "Резюме", "Плюси", "Мінуси", "Рекомендація", "Коментар РОП"]
-    ws.update(range_name="J1:P1", values=[headers])
+    # 1. Читаємо дату останнього запуску
+    last_run_date = ws_conf.acell('B1').value
+    if not last_run_date:
+        # Якщо вперше - беремо за вчора
+        last_run_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     
-    print("Завантаження даних (щоб не блокував Google)...")
-    all_rows = ws.get_all_values()
-    total = len(all_rows)
+    print(f"📅 Шукаємо ліди новіші за: {last_run_date}")
+
+    total_added = 0
+    # Перебираємо всіх менеджерів
+    manager_ids_int = [1519, 2077, 6894, 13408]
     
-    for i in range(1, total):
-        row_num = i + 1
-        row = all_rows[i]
-        
-        if len(row) <= 8: continue
-        
-        text = row[8]
-        client_name = row[3] if len(row) > 3 else ""
-        
-        # Перевірка вже існуючої оцінки в пам'яті
-        existing_status = row[9] if len(row) > 9 else ""
-        if existing_status and len(str(existing_status)) > 1:
-            continue
+    for mgr_id in manager_ids_int:
+        print(f"👤 Менеджер {mgr_id}...", end=" ")
+        try:
+            payload = {
+                "order": {"DATE_CREATE": "ASC"},
+                "filter": {"ASSIGNED_BY_ID": mgr_id, ">DATE_CREATE": f"{last_run_date}T00:00:00"},
+                "select": ["ID", "TITLE", "STATUS_ID", "DATE_CREATE", "HAS_DEAL", "NAME", "LAST_NAME", "SOURCE_ID"]
+            }
+            # Читаємо першу сторінку (50 штук). 
+            leads = requests.post(f"{BITRIX_WEBHOOK}crm.lead.list", json=payload).json().get('result', [])
+            
+            if not leads:
+                print("Немає нових.")
+                continue
 
-        print(f"[{i}/{total-1}] Рядок {row_num}...", end=" ")
-        
-        result = analyze_row(text, client_name)
-        
-        if result:
-            data = [
-                result.get('product_type', '-'),
-                result.get('score', '-'),
-                result.get('summary', '-'),
-                str(result.get('good_points', '-')),
-                str(result.get('bad_points', '-')),
-                result.get('recommendation', '-'),
-                result.get('sales_feedback', '-')
-            ]
-            try:
-                # Пауза 1.5 секунди - гарантія від бану
-                time.sleep(1.5) 
-                ws.update(range_name=f"J{row_num}:P{row_num}", values=[data])
-                print(f"OK! -> {result.get('product_type')} ({result.get('score')})")
-            except Exception as e:
-                print(f"Write Error: {e}")
-                time.sleep(10)
-        else:
-            print("SKIP (Error/Empty)")
-            try: ws.update(range_name=f"J{row_num}", values=[["ERROR"]])
-            except: pass
+            print(f"Знайдено {len(leads)} нових лідів.")
 
-    print("\n[DONE] Робота завершена!")
+            for lead in leads:
+                source_id = str(lead.get('SOURCE_ID', ''))
+                if 'INSTAGRAM' not in source_id.upper(): continue
+                
+                chat_text = get_chat_text(lead['ID'])
+                if not chat_text: continue
+
+                client_name = f"{lead.get('NAME', '')} {lead.get('LAST_NAME', '')}".strip()
+                
+                # Аналіз
+                result = analyze_row(chat_text, client_name)
+                
+                if result:
+                    readable_source = source_id
+                    readable_status = lead.get('STATUS_ID')
+                    has_deal = "Є" if lead.get('HAS_DEAL') == 'Y' else "Ні"
+                    link = f"https://bitrix.emet.in.ua/crm/lead/details/{lead['ID']}/"
+
+                    row_data = [
+                        lead['ID'], lead['DATE_CREATE'][:10], mgr_id, client_name,
+                        readable_source, readable_status, has_deal, link, chat_text[:45000],
+                        result.get('product_type'), result.get('score'), result.get('summary'),
+                        str(result.get('good_points')), str(result.get('bad_points')),
+                        result.get('recommendation'), result.get('sales_feedback')
+                    ]
+                    
+                    ws_data.append_row(row_data)
+                    total_added += 1
+                    print(f"   [+] Лід {lead['ID']} додано.")
+                    time.sleep(1.5)
+                    
+        except Exception as e:
+            print(f"Err: {e}")
+
+    # 2. Оновлюємо дату в конфізі
+    today = datetime.now().strftime("%Y-%m-%d")
+    ws_conf.update_acell('B1', today)
+    print(f"\n✅ [DONE] Додано {total_added} рядків. Дата оновлена на {today}.")
 
 if __name__ == "__main__":
     main()
