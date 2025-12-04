@@ -398,7 +398,7 @@ def main():
                         # Обновляем диапазон (кроме ID и даты, обновляем статус, сделку и AI данные)
                         # A=1, B=2, C=3... I=9 (Chat), J=10 (Type), K=11 (Score)...
                         # Обновляем все поля строки
-                        ws_data.update(f"A{row_index}:P{row_index}", [row_data])
+                        ws_data.update(range_name=f"A{row_index}:P{row_index}", values=[row_data])
                         print(f"   [♻️ UPD] Лід {lead['ID']} оновлено.")
                     else:
                         # Добавляем новую
